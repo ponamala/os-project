@@ -1,0 +1,332 @@
+import os
+import sqlite3
+import bcrypt
+import shutil
+import random
+import string
+import subprocess
+import time
+import platform
+from plyer import notification
+from cryptography.fernet import Fernet
+
+# **Ensure Database is Correctly Initialized**
+def initialize_db():
+    conn = sqlite3.connect("sfms.db")
+    cursor = conn.cursor()
+
+    # Ensure users table has the role column
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL CHECK(role IN ('admin', 'user', 'guest'))
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+# **Generate Encryption Key (Only Once)**
+def generate_key():
+    if not os.path.exists("secret.key"):
+        key = Fernet.generate_key()
+        with open("secret.key", "wb") as key_file:
+            key_file.write(key)
+
+# **Load Encryption Key**
+def load_key():
+    return open("secret.key", "rb").read()
+# **Generate OTP**
+def generate_otp():
+    otp = ''.join(random.choices(string.digits, k=6))
+    send_otp_notification(otp)  # Send OTP as notification
+    return otp
+# Send OTP as Notification
+def send_otp_notification(otp):
+    system = platform.system()
+
+    if system == "Windows" or system == "Linux" or system == "Darwin":
+        notification.notify(
+            title="Your OTP Code",
+            message=f"Your OTP is: {otp}",
+            timeout=10
+        )
+#    else:
+#   print(f"Your OTP is: {otp}")  # Fallback for unknown systems
+
+# **OTP Verification**
+def verify_otp():
+    otp = generate_otp()
+    #print(f"Your OTP is: {otp}")
+
+    user_input = input("Enter OTP: ").strip()
+
+    if user_input == otp:
+        print("OTP verified successfully!")
+        return True
+    else:
+        print("Invalid OTP!")
+        return False
+
+# **User Registration**
+def register_user():
+    username = input("Enter username: ").strip()
+    password = input("Enter password: ").strip()
+    role = input("Enter role (admin/user/guest): ").strip().lower()
+
+    if role not in ["admin", "user", "guest"]:
+        print("Invalid role! Please enter 'admin', 'user', or 'guest'.")
+        return
+
+    hashed_password = bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+
+    conn = sqlite3.connect("sfms.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, hashed_password, role))
+        conn.commit()
+        print(f"User '{username}' registered successfully with role '{role}'!")
+    except sqlite3.IntegrityError:
+        print("Error: Username already exists!")
+    finally:
+        conn.close()
+
+# **User Login**
+def login_user():
+    username = input("Enter username: ").strip()
+    password = input("Enter password: ").strip()
+
+    conn = sqlite3.connect("sfms.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT password, role FROM users WHERE username=?", (username,))
+    result = cursor.fetchone()
+    conn.close()
+
+    if result and bcrypt.checkpw(password.encode(), result[0]):
+        if verify_otp():  # OTP verification
+            print(f"Login successful! You are logged in as '{result[1]}'.")
+            return result[1], username
+        else:
+            print("OTP verification failed. Login denied.")
+            return None, None
+    else:
+        print("Invalid username or password.")
+        return None, None
+# **View Files in a Directory (Admin/User/Guest)**
+def view_files():
+    folder = input("Enter folder path: ").strip().replace('"', '')
+
+    if os.path.isfile(folder):  # If the user enters a file path, extract the directory
+        folder = os.path.dirname(folder)
+
+    if os.path.isdir(folder):
+        files = os.listdir(folder)
+        if files:
+            print("\nFiles in Directory:")
+            for file in files:
+                print(f" - {file}")
+        else:
+            print("No files found in the directory.")
+    else:
+        print("Error: Directory not found! Please enter a valid folder path.")
+
+# **File Details (Admin/User/Guest)**
+def file_details():
+    file_path = input("Enter file path to view details: ").strip().replace('"', '')
+
+    if os.path.isfile(file_path):
+        file_size = os.path.getsize(file_path)  # Get file size in bytes
+        file_modified_time = os.path.getmtime(file_path)  # Get last modification time
+        print(f"File Size: {file_size / 1024:.2f} KB")
+        print(f"Last Modified: {file_modified_time}")
+    else:
+        print("Error: File not found!")
+
+# **Rename a File (Admin/User)**
+def rename_file():
+    file_path = input("Enter current file path to rename: ").strip().replace('"', '')
+    
+    if os.path.isfile(file_path):
+        new_name = input("Enter new name for the file: ").strip()
+        new_file_path = os.path.join(os.path.dirname(file_path), new_name)
+        os.rename(file_path, new_file_path)
+        print("File renamed successfully!")
+    else:
+        print("Error: File not found!")
+
+# **Change Password**
+def change_password(username):
+    old_password = input("Enter current password: ").strip()
+    new_password = input("Enter new password: ").strip()
+
+    conn = sqlite3.connect("sfms.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT password FROM users WHERE username=?", (username,))
+    result = cursor.fetchone()
+    conn.close()
+
+    if result and bcrypt.checkpw(old_password.encode(), result[0]):
+        hashed_password = bcrypt.hashpw(new_password.encode(), bcrypt.gensalt())
+        conn = sqlite3.connect("sfms.db")
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users SET password=? WHERE username=?", (hashed_password, username))
+        conn.commit()
+        conn.close()
+        print("Password changed successfully!")
+    else:
+        print("Error: Incorrect current password!")
+
+# **Open a File (Admin/User/Guest)**
+def open_file():
+    file_path = input("Enter file path to open: ").strip().replace('"', '')
+
+    if os.path.isfile(file_path):
+        try:
+            if os.name == "nt":  # Windows
+                os.startfile(file_path)
+            elif os.name == "posix":  # Linux/macOS
+                subprocess.run(["xdg-open", file_path])
+            print("File opened successfully!")
+        except Exception as e:
+            print(f"Error opening file: {e}")
+    else:
+        print("Error: File not found!")
+
+# **Encrypt a File (Admin/User)**
+def encrypt_file():
+    file_path = input("Enter file path to encrypt: ").strip().replace('"', '')
+
+    if os.path.isfile(file_path):
+        key = load_key()
+        cipher = Fernet(key)
+
+        with open(file_path, "rb") as file:
+            file_data = file.read()
+
+        encrypted_data = cipher.encrypt(file_data)
+
+        with open(file_path + ".enc", "wb") as file:
+            file.write(encrypted_data)
+
+        os.remove(file_path)
+        print("File encrypted successfully!")
+    else:
+        print("Error: File not found!")
+
+# **Decrypt a File (Admin/User)**
+def decrypt_file():
+    file_path = input("Enter file path to decrypt: ").strip().replace('"', '')
+
+    if os.path.isfile(file_path):
+        key = load_key()
+        cipher = Fernet(key)
+
+        with open(file_path, "rb") as file:
+            encrypted_data = file.read()
+
+        decrypted_data = cipher.decrypt(encrypted_data)
+
+        original_file_path = file_path.replace(".enc", "")
+        with open(original_file_path, "wb") as file:
+            file.write(decrypted_data)
+
+        os.remove(file_path)
+        print("File decrypted successfully!")
+    else:
+        print("Error: File not found!")
+
+# **Delete a File (Admin Only)**
+def delete_file(role):
+    if role != "admin":
+        print("Access Denied! Only admins can delete files.")
+        return
+
+    file_path = input("Enter file path to delete: ").strip().replace('"', '')
+
+    if os.path.isfile(file_path):
+        os.remove(file_path)
+        print("File deleted successfully!")
+    else:
+        print("Error: File not found!")
+
+# **Move a File (Admin/User)**
+def move_file(role):
+    if role not in ["admin", "user"]:
+        print("Access Denied! Only admins and users can move files.")
+        return
+
+    file_path = input("Enter file path to move: ").strip().replace('"', '')
+    destination = input("Enter destination folder path: ").strip().replace('"', '')
+
+    if os.path.isfile(file_path) and os.path.isdir(destination):
+        shutil.move(file_path, destination)
+        print("File moved successfully!")
+    else:
+        print("Error: File or destination not found!")
+
+# **Dashboard Menu with Role-Based Permissions**
+def show_dashboard(role, username):
+    while True:
+        print("\n Secure File Management System Dashboard")
+        print("1. View Files (Admin/User/Guest)")
+        print("2. Open File (Admin/User/Guest)")
+        print("3. File Details (Admin/User/Guest)")
+
+        if role in ["admin", "user"]:
+            print("4. Encrypt File (Admin/User)")
+            print("5. Decrypt File (Admin/User)")
+
+        if role == "admin":
+            print("6. Delete File (Admin Only)")
+
+        print("7. Rename File (Admin/User)")
+        print("8. Change Password")
+        print("9. Logout")
+
+        choice = input("Enter your choice: ").strip()
+
+        if choice == "1":
+            view_files()
+        elif choice == "2":
+            open_file()
+        elif choice == "3":
+            file_details()
+        elif choice == "4" and role in ["admin", "user"]:
+            encrypt_file()
+        elif choice == "5" and role in ["admin", "user"]:
+            decrypt_file()
+        elif choice == "6" and role == "admin":
+            delete_file(role)
+        elif choice == "7" and role in ["admin", "user"]:
+            rename_file()
+        elif choice == "8":
+            change_password(username)
+        elif choice == "9":
+            print("Logging out...")
+            break
+        else:
+            print("Invalid choice! Please enter a valid number.")
+
+# **Main Function**
+if __name__ == "__main__":
+    initialize_db()
+    generate_key()
+
+    while True:
+        print("\n1. Register")
+        print("2. Login")
+        print("3. Exit")
+        choice = input("Enter your choice: ").strip()
+
+        if choice == "1":
+            register_user()
+        elif choice == "2":
+            role, username = login_user()
+            if role:
+                show_dashboard(role, username)
+        elif choice == "3":
+            print("Exiting program...")
+            break
+        else:
+            print("Invalid choice! Please enter 1, 2, or 3.")
